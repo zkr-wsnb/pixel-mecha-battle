@@ -1,0 +1,1206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>像素机甲对战 - 帧数据格斗</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#0a0a12;touch-action:none;user-select:none;-webkit-user-select:none}
+#gameWrap{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges;border:2px solid #334;border-radius:4px;cursor:pointer}
+#ui{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+#info{position:absolute;top:10px;left:50%;transform:translateX(-50%);color:#8af;font:16px monospace;text-align:center;pointer-events:none;text-shadow:0 0 8px rgba(0,0,0,0.8)}
+#info a{color:#6cf;pointer-events:auto}
+#status{position:absolute;top:40px;left:50%;transform:translateX(-50%);color:#fca;font:14px monospace;pointer-events:none;text-shadow:0 0 6px rgba(0,0,0,0.8)}
+#modeBtn{position:absolute;bottom:10px;right:10px;pointer-events:auto;padding:6px 14px;font:12px monospace;background:#223;color:#8af;border:1px solid #446;border-radius:4px;cursor:pointer;z-index:10}
+#modeBtn:hover{background:#334}
+#controls{position:absolute;bottom:10px;left:10px;color:#667;font:11px monospace;pointer-events:none;text-shadow:0 0 4px #000;line-height:1.6}
+@media(max-width:600px){
+  #info{font-size:12px;top:4px}
+  #status{font-size:11px;top:28px}
+  #controls{font-size:9px;bottom:4px}
+}
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <canvas id="gc"></canvas>
+  <div id="ui">
+    <div id="info">⚡ 像素机甲对战 · <a href="#" id="pvpLink">联机匹配</a> · <a href="#" id="resetLink">重新开始</a></div>
+    <div id="status">单人模式 (AI)</div>
+    <button id="modeBtn">触控模式: 关</button>
+    <div id="controls">W/↑跳 · A/←左 · D/→右 · S/↓防<br>J攻击 · K技能 · L翻滚</div>
+  </div>
+</div>
+<script>
+/* ============================================================
+   像素机甲对战 - 帧数据格斗系统
+   参考《苍翼默示录》帧数据设计:
+   - 启动/持续/恢复帧
+   - 伤害修正 (基底+乘算)
+   - 破招 (Counter Hit)
+   - 防御槽 / 破防
+   ============================================================ */
+
+/* ===== 画布尺寸 ===== */
+const W = 640, H = 360;
+const SCL = W/640; /* 缩放比 */
+
+const canvas = document.getElementById('gc');
+const ctx = canvas.getContext('2d');
+canvas.width = W;
+canvas.height = H;
+
+/* ===== 游戏常量 ===== */
+const GRAVITY = 0.35;
+const GROUND_Y = 310;
+const MECH_W = 28, MECH_H = 40;
+
+/* ===== 帧数据定义 (基于60fps) ===== */
+const FRAME = 1/60;
+const ATK_DATA = {
+  jab:  { startup:4, active:5, recovery:8,  damage:10, knockback:1.8, hitstun:0.20, blockstun:0.10 },
+  heavy:{ startup:10,active:3, recovery:14, damage:22, knockback:2.8, hitstun:0.35, blockstun:0.15 },
+  beam: { startup:8, active:0, recovery:12, damage:15, knockback:2.0, hitstun:0.25, blockstun:0.12 },
+};
+
+/* ===== 像素精灵定义 (16x18) ===== */
+const _ = 0, R = 1, O = 2, Y = 3, G = 4, B = 5, P = 6, W2 = 7, D = 8;
+// 红色机甲调色板
+const PAL_RED   = [0,'#222','#e33','#f84','#fd4','#444','#666','#fff','#111'];
+// 蓝色机甲调色板
+const PAL_BLUE = [0,'#222','#33e','#48f','#4df','#444','#666','#fff','#111'];
+
+const SPR_IDLE = [
+  [_,_,_,_,R,R,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,R,R,O,O,R,R,R,R,O,O,R,R,_,_],
+  [_,_,R,R,O,O,R,R,R,R,O,O,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,G,G,R,R,R,_,_,_,_],
+  [_,_,_,_,R,R,G,G,G,G,R,R,_,_,_,_],
+  [_,_,_,_,R,R,G,G,G,G,R,R,_,_,_,_],
+  [_,_,_,_,R,R,R,G,G,R,R,R,_,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+];
+
+const SPR_WALK1 = [
+  [_,_,_,_,R,R,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,R,R,O,O,R,R,R,R,O,O,R,R,_,_],
+  [_,_,R,R,O,O,R,R,R,R,O,O,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,G,G,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,G,G,G,G,R,R,_,_,_],
+  [_,_,_,_,R,R,R,G,G,G,G,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,G,G,R,R,R,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+];
+
+const SPR_WALK2 = [
+  [_,_,_,_,R,R,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,R,R,O,O,R,R,R,R,O,O,R,R,_,_],
+  [_,_,R,R,O,O,R,R,R,R,O,O,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,G,G,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,G,G,G,G,R,R,_,_,_],
+  [_,_,_,_,R,R,R,G,G,G,G,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,G,G,R,R,R,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,R,R,R,R,_,_,_,_,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+];
+
+const SPR_JUMP = [
+  [_,_,_,_,_,_,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,R,R,O,O,R,R,O,O,R,R,_,_,_],
+  [_,_,R,R,R,O,O,R,R,O,O,R,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,G,G,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,G,G,G,G,R,R,_,_,_],
+  [_,_,_,_,R,R,R,G,G,G,G,R,R,_,_,_],
+  [_,_,_,_,_,R,R,R,R,G,G,R,R,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,R,R,_,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+];
+
+const SPR_ATTACK = [
+  [_,_,_,_,R,R,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,R,R,O,O,R,R,R,R,O,O,R,R,_,_],
+  [_,_,R,R,O,O,R,R,R,R,O,O,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,R,R,R],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,R,R,R],
+  [_,_,_,_,R,R,R,R,R,R,R,R,R,R,R,_],
+  [_,_,_,_,R,R,R,R,G,G,R,R,R,R,_,_],
+  [_,_,_,_,R,R,R,G,G,G,G,R,R,R,_,_],
+  [_,_,_,_,R,R,R,G,G,G,G,R,R,_,_,_],
+  [_,_,_,_,_,R,R,R,R,G,G,R,R,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+];
+
+const SPR_ROLL = [
+  [_,_,_,_,_,_,_,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,R,R],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,R,R],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,_,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+];
+
+const SPR_HURT = [
+  [_,_,_,_,_,_,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,_,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,R,R,R,_,_,_,_,R,R,R,_,_,_],
+  [_,_,R,R,R,R,_,_,_,_,R,R,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,R,R,R,R,R,R,R,R,R,R,R,R,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,R,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,R,R,R,R,R,R,_,_,_],
+  [_,_,_,_,R,R,R,_,_,_,R,R,R,_,_,_],
+  [_,_,_,_,_,R,R,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,R,R,R,R,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,_,R,R,R,R,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,R,R,_,_,_,_,_,_],
+  [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_],
+];
+
+/* ===== 精灵集 ===== */
+const S1 = { idle:SPR_IDLE, walk1:SPR_WALK1, walk2:SPR_WALK2, jump:SPR_JUMP, attack:SPR_ATTACK, roll:SPR_ROLL, hurt:SPR_HURT };
+const S2 = { idle:SPR_IDLE, walk1:SPR_WALK1, walk2:SPR_WALK2, jump:SPR_JUMP, attack:SPR_ATTACK, roll:SPR_ROLL, hurt:SPR_HURT };
+
+/* ===== 工具函数 ===== */
+function aabb(a,b){
+  return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y;
+}
+
+function rectOverlap(a,b){
+  return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y;
+}
+
+/* ===== 粒子系统 ===== */
+class Particle{
+  constructor(o){
+    this.x=o.x; this.y=o.y; this.vx=o.vx||0; this.vy=o.vy||0;
+    this.s=o.s||2; this.color=o.color||'#fff';
+    this.life=o.life||0.3; this.maxLife=this.life;
+  }
+  update(dt){
+    this.x+=this.vx; this.y+=this.vy;
+    this.vy+=0.1; this.life-=dt;
+  }
+  get dead(){ return this.life<=0; }
+  get alpha(){ return Math.max(0,this.life/this.maxLife); }
+}
+
+/* ===== 光束/弹丸 ===== */
+class Beam{
+  constructor(o){
+    this.x=o.x; this.y=o.y; this.vx=o.vx;
+    this.owner=o.owner; this.w=24; this.h=4;
+    this.life=2; this.dealt=false;
+  }
+  update(dt, world){
+    this.x+=this.vx; this.life-=dt;
+    if(this.life<=0) return;
+    // 与对手碰撞检测
+    for(const m of world.mechas){
+      if(m===this.owner || m.dead) continue;
+      if(m.invuln>0) continue;
+      const hb=m.hurtBox();
+      if(rectOverlap({x:this.x,y:this.y,w:this.w,h:this.h}, hb)){
+        if(!this.dealt){
+          this.dealt=true;
+          const data = ATK_DATA.beam;
+          let isCounter = (m.atkPhase==='startup' || m.state==='attack');
+          let dmg = Math.floor(data.damage * this.owner.dmgScale);
+          if(isCounter) dmg = Math.floor(dmg * 1.5);
+          dmg = Math.max(3, dmg);
+          m.takeDamage(dmg, this.vx>0?1:-1, world, isCounter);
+          this.owner.vx -= (this.vx>0?1:-1) * data.knockback * 0.3;
+          this.owner.comboCount++;
+          this.owner.dmgScale = Math.max(0.3, Math.pow(0.85, this.owner.comboCount));
+          this.owner.comboTimer = 0.4;
+        }
+        this.life=-1;
+        for(let i=0;i<6;i++) world.parts.push(new Particle({
+          x:this.x+this.w/2, y:this.y+this.h/2,
+          vx:(Math.random()-0.5)*4, vy:(Math.random()-0.5)*4,
+          s:2, color:'#6cf', life:0.2+Math.random()*0.2
+        }));
+        break;
+      }
+    }
+  }
+  get dead(){ return this.life<=0; }
+}
+
+/* ===== 帧数据: 机甲类 ===== */
+class Mech{
+  constructor(o){
+    this.x=o.x; this.y=GROUND_Y-MECH_H;
+    this.vx=0; this.vy=0; this.facing=o.dir;
+    this.color=o.color; this.name=o.name||'';
+    this.isAI=!!o.isAI;
+    this.hp=100; this.maxhp=100;
+    this.energy=100; this.maxEnergy=100;
+    this.onGround=true; this.canDoubleJump=false;
+    this.state='idle'; // idle|walk|jump|attack|roll|hit|block
+    this.rollTimer=0; this.rollCool=0; this.skillCool=0;
+    this.hitFlash=0; this.invuln=0; this.dead=false;
+    this.walkFrame=0; this.animTime=0;
+    this.sets=o.color==='red'?S1:S2;
+    this.rollVx=0;
+    // 帧数据系统
+    this.atkType = null;       // 'jab'|'heavy'|'beam'
+    this.atkPhase = null;      // null|'startup'|'active'|'recovery'
+    this.atkFrame = 0;
+    this.atkCool = 0;
+    this.dealt = false;
+    this.whiffed = false;
+    // 连招与伤害修正
+    this.comboCount = 0;
+    this.dmgScale = 1.0;
+    this.comboTimer = 0;
+    // 防御槽
+    this.guard = 100;
+    this.maxGuard = 100;
+    this.guardRegenDelay = 0;
+    // 状态
+    this.hitstunTimer = 0;
+    this.blocking = false;
+    this._counterHit = false;
+  }
+  rects(){ return {x:this.x+2*SCL, y:this.y, w:MECH_W-4*SCL, h:MECH_H}; }
+  hurtBox(){ return this.rects(); }
+  attackBox(){
+    if(this.atkType==='beam') return null;
+    const r=14*SCL;
+    return this.facing>0
+      ? {x:this.x+MECH_W-2*SCL, y:this.y+3*SCL, w:r, h:8*SCL}
+      : {x:this.x+2*SCL-r, y:this.y+3*SCL, w:r, h:8*SCL};
+  }
+
+  update(dt, input, opp, world){
+    if(this.dead) return;
+    this.animTime+=dt;
+    if(this.atkCool>0) this.atkCool-=dt;
+    if(this.rollCool>0) this.rollCool-=dt;
+    if(this.skillCool>0) this.skillCool-=dt;
+    if(this.hitFlash>0) this.hitFlash-=dt;
+    if(this.invuln>0) this.invuln-=dt;
+    if(this.energy<this.maxEnergy) this.energy=Math.min(this.maxEnergy,this.energy+dt*10);
+
+    // 防御槽回复
+    if(this.guardRegenDelay>0) this.guardRegenDelay-=dt;
+    else if(this.guard<this.maxGuard) this.guard=Math.min(this.maxGuard, this.guard+dt*8);
+
+    // 帧数据攻击计时
+    if(this.atkPhase){
+      this.atkFrame++;
+      const data = ATK_DATA[this.atkType];
+      if(!data) { this.atkPhase=null; this.atkType=null; return; }
+      const totalFrames = data.startup + data.active + data.recovery;
+      if(this.atkFrame >= totalFrames){
+        this.atkPhase = null; this.atkType = null; this.atkFrame = 0;
+        this.state = 'idle';
+      } else if(this.atkFrame === data.startup){
+        this.atkPhase = 'active';
+        this.checkHit(opp, world, data);
+      } else if(this.atkFrame === data.startup + data.active){
+        this.atkPhase = 'recovery';
+        if(!this.dealt) this.whiffed = true;
+      }
+    }
+
+    // 受击硬直计时
+    if(this.hitstunTimer>0){
+      this.hitstunTimer-=dt;
+      if(this.hitstunTimer<=0 && this.state==='hit'){
+        this.state='idle';
+        if(this.comboTimer>0) this.comboTimer=0;
+      }
+    }
+
+    // 翻滚计时
+    if(this.state==='roll'){
+      this.rollTimer-=dt;
+      if(this.rollTimer<=0){ this.state='idle'; this.vx=0; }
+    }
+
+    const canAct = !this.atkPhase && this.state!=='roll' && this.hitstunTimer<=0 && this.hitFlash<=0;
+
+    // 防御
+    this.blocking = false;
+    if(canAct && input.down && this.onGround){
+      this.blocking = true;
+      this.state = 'block';
+      this.vx = 0;
+    }
+
+    // 翻滚 (无敌)
+    if(canAct && input.roll && this.rollCool<=0){
+      this.state='roll'; this.rollTimer=0.4; this.rollCool=0.75;
+      this.invuln=0.4; this.rollVx=this.facing*2.5; this.vx=this.rollVx; this.vy=0;
+      this.onGround=false;
+      this.comboCount = 0; this.dmgScale = 1.0;
+      for(let i=0;i<4;i++) world.parts.push(new Particle({
+        x:this.x+MECH_W/2, y:this.y+MECH_H/2, vx:(Math.random()-0.5)*3, vy:(Math.random()-0.5)*3-1,
+        s:2, color:this.color==='red'?'#ffd64a':'#39f0d8', life:0.2+Math.random()*0.2
+      }));
+      return;
+    }
+
+    // 近战攻击 (帧数据驱动)
+    if(canAct && input.attack && this.atkCool<=0 && !this.atkPhase){
+      this.atkType = 'jab';
+      this.atkPhase = 'startup';
+      this.atkFrame = 0;
+      this.dealt = false;
+      this.whiffed = false;
+      this.state = 'attack';
+      this.atkCool = 0.5;
+    }
+
+    // 重攻击 (帧数据驱动)
+    if(canAct && input.heavy && this.atkCool<=0 && !this.atkPhase){
+      this.atkType = 'heavy';
+      this.atkPhase = 'startup';
+      this.atkFrame = 0;
+      this.dealt = false;
+      this.whiffed = false;
+      this.state = 'attack';
+      this.atkCool = 0.8;
+    }
+
+    // 技能 (能量炮)
+    if(canAct && input.skill && this.skillCool<=0 && this.energy>=35){
+      this.energy-=35; this.skillCool=1.8;
+      const dir=this.facing;
+      world.beams.push(new Beam({
+        x:dir>0?this.x+MECH_W:this.x-18, y:this.y+6*SCL, vx:dir*3.5, owner:this
+      }));
+      this.vx-=dir*1.0;
+      for(let i=0;i<5;i++) world.parts.push(new Particle({
+        x:this.x+MECH_W/2, y:this.y+6*SCL, vx:-dir*(1+Math.random()*2), vy:(Math.random()-0.5)*2,
+        s:2, color:this.color==='red'?'#ffd64a':'#39f0d8', life:0.3+Math.random()*0.2
+      }));
+      this.comboCount = 0; this.dmgScale = 1.0;
+      return;
+    }
+
+    // 移动
+    if(canAct && !this.blocking){
+      if(input.left){ this.vx=-0.9; this.facing=-1; }
+      else if(input.right){ this.vx=0.9; this.facing=1; }
+      else this.vx=0;
+
+      if(input.up){
+        if(this.onGround){ this.vy=-5.5; this.onGround=false; this.canDoubleJump=true; }
+        else if(this.canDoubleJump){ this.vy=-5.0; this.canDoubleJump=false; this.onGround=false; }
+      }
+      if(input.down && !this.onGround) this.vy+=0.5;
+    }
+
+    // 翻滚惯性
+    if(this.state==='roll'){
+      this.vx=this.rollVx;
+      this.vy+=GRAVITY*0.5;
+    }
+
+    // 物理
+    this.vy+=GRAVITY;
+    this.x+=this.vx;
+    this.y+=this.vy;
+    if(this.y>=GROUND_Y-MECH_H){
+      this.y=GROUND_Y-MECH_H; this.vy=0; this.onGround=true; this.canDoubleJump=false;
+    }
+    this.x=Math.max(6,Math.min(W-MECH_W-6,this.x));
+
+    // 状态机
+    if(!this.atkPhase && this.state!=='roll' && this.state!=='hit' && this.state!=='block'){
+      if(!this.onGround) this.state='jump';
+      else if(Math.abs(this.vx)>0.3) this.state='walk';
+      else this.state='idle';
+    }
+    if(this.state==='walk') this.walkFrame+=dt*8;
+
+    // 连击超时
+    if(this.comboTimer>0){
+      this.comboTimer-=dt;
+      if(this.comboTimer<=0){ this.comboCount=0; this.dmgScale=1.0; }
+    }
+  }
+
+  /** 攻击命中检测 (在 active 帧调用) */
+  checkHit(opp, world, data){
+    if(this.dealt) return;
+    const ab = this.attackBox();
+    if(!ab) return;
+    const hb = opp.hurtBox();
+    if(!aabb(ab,hb) || opp.invuln>0) return;
+
+    this.dealt = true;
+
+    // 判断是否防御
+    if(opp.blocking){
+      opp.guard = Math.max(0, opp.guard - data.damage * 0.5);
+      opp.guardRegenDelay = 0.5;
+      opp.hitFlash = 0.08;
+      opp.vx += this.facing * data.knockback * 0.3;
+      if(opp.guard <= 0){
+        opp.guard = 0;
+        opp.takeDamage(Math.floor(data.damage * 1.5), this.facing, world, true);
+        this.chainCombo(world);
+      }
+      return;
+    }
+
+    // 破招检测 (对手在攻击启动帧时被命中)
+    let isCounter = false;
+    if(opp.atkPhase === 'startup' || opp.state==='attack'){
+      isCounter = true;
+    }
+
+    // 伤害计算: 基底修正 + 乘算修正
+    let finalDmg = Math.floor(data.damage * this.dmgScale);
+    if(isCounter) finalDmg = Math.floor(finalDmg * 1.5);
+    finalDmg = Math.max(3, finalDmg);
+
+    opp.takeDamage(finalDmg, this.facing, world, isCounter);
+    this.vx -= this.facing * data.knockback * 0.3;
+
+    // 连击修正
+    this.comboCount++;
+    this.dmgScale = Math.max(0.3, Math.pow(0.85, this.comboCount));
+    this.comboTimer = 0.4;
+  }
+
+  /** 连击延续 */
+  chainCombo(world){
+    this.comboCount++;
+    this.dmgScale = Math.max(0.3, Math.pow(0.85, this.comboCount));
+    this.comboTimer = 0.4;
+  }
+
+  takeDamage(dmg, fromDir, world, isCounter){
+    this.hp = Math.max(0, this.hp - dmg);
+    this.hitFlash = 0.15;
+    this.invuln = 0.3;
+    this.state = 'hit';
+    this.atkPhase = null; this.atkType = null; // 中断攻击
+
+    const hitstun = isCounter ? 0.35 : 0.20;
+    this.hitstunTimer = hitstun;
+    this.vx = fromDir * 1.8;
+    this.vy = isCounter ? -3.5 : -2.5;
+    this.onGround = false;
+
+    // 破招特效
+    if(isCounter){
+      world.shake = 8;
+      const cx=this.x+MECH_W/2, cy=this.y+MECH_H/2;
+      for(let i=0;i<14;i++){
+        const a=Math.random()*Math.PI*2, sp=2+Math.random()*4;
+        world.parts.push(new Particle({x:cx,y:cy,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-1,
+          s:3,color:['#b045f0','#ffd64a','#fff'][i%3],life:0.4+Math.random()*0.3}));
+      }
+    } else {
+      world.shake = 4;
+      const cx=this.x+MECH_W/2, cy=this.y+MECH_H/2;
+      for(let i=0;i<8;i++){
+        const a=Math.random()*Math.PI*2, sp=1+Math.random()*3;
+        world.parts.push(new Particle({x:cx,y:cy,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-1,
+          s:2,color:['#ffe066','#ff8a1f','#ff5566'][i%3],life:0.3+Math.random()*0.3}));
+      }
+    }
+
+    if(this.hp<=0){ this.dead=true; this.state='idle'; }
+  }
+}
+
+/* ===== 渲染函数 ===== */
+
+/** 像素精灵渲染 */
+function drawSprite(spr, x, y, pal, flip, scale){
+  scale = scale || SCL;
+  const rows = spr.length;
+  const cols = spr[0].length;
+  for(let row=0; row<rows; row++){
+    for(let col=0; col<cols; col++){
+      const c = spr[row][col];
+      if(c === 0) continue;
+      const px = flip ? (x + (cols-1-col)*scale) : (x + col*scale);
+      const py = y + row*scale;
+      ctx.fillStyle = pal[c] || '#f0f';
+      ctx.fillRect(px, py, scale, scale);
+    }
+  }
+}
+
+function getMechSprite(mech){
+  const s = mech.sets;
+  if(mech.hitFlash>0 && Math.floor(mech.hitFlash*60)%6<3) return null; // 闪烁
+  if(mech.atkPhase) return s.attack;
+  switch(mech.state){
+    case 'walk': return (Math.floor(mech.walkFrame)%2===0) ? s.walk1 : s.walk2;
+    case 'jump': return s.jump;
+    case 'roll': return s.roll;
+    case 'hit': return s.hurt;
+    case 'block': return s.hurt;
+    case 'attack': return s.attack;
+    default: return s.idle;
+  }
+}
+
+function drawMech(mech){
+  const spr = getMechSprite(mech);
+  if(!spr) return;
+  const pal = mech.color==='red' ? PAL_RED : PAL_BLUE;
+  // 受击闪白
+  if(mech.hitFlash>0 && Math.floor(mech.hitFlash*60)%4<2){
+    // 白色覆盖
+    drawSprite(spr, mech.x, mech.y, PAL_BLUE.map((c,i)=>i===0?0:'#fff'), mech.facing<0, SCL);
+  } else {
+    drawSprite(spr, mech.x, mech.y, pal, mech.facing<0, SCL);
+  }
+}
+
+function drawBackground(){
+  // 夜空
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,'#0a0a1a');
+  grad.addColorStop(0.6,'#1a1a2e');
+  grad.addColorStop(1,'#2a1a1a');
+  ctx.fillStyle=grad;
+  ctx.fillRect(0,0,W,H);
+
+  // 星星
+  for(let i=0;i<30;i++){
+    const sx=(i*137+50)%W, sy=(i*97+20)%(GROUND_Y-40);
+    const bright=0.4+((i*53)%100)/200;
+    ctx.fillStyle=`rgba(200,220,255,${bright})`;
+    const ss=((i*31)%3)+1;
+    ctx.fillRect(sx,sy,ss,ss);
+  }
+
+  // 月亮
+  ctx.fillStyle='#ccd';
+  ctx.beginPath();
+  ctx.arc(540,50,28,0,Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle='#aab';
+  ctx.beginPath();
+  ctx.arc(548,44,24,0,Math.PI*2);
+  ctx.fill();
+
+  // 地面
+  ctx.fillStyle='#2a2a3a';
+  ctx.fillRect(0,GROUND_Y,W,H-GROUND_Y);
+  // 地面线
+  ctx.strokeStyle='#3a3a5a';
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(0,GROUND_Y);
+  ctx.lineTo(W,GROUND_Y);
+  ctx.stroke();
+
+  // 地面纹理
+  ctx.fillStyle='#33334a';
+  for(let i=0;i<20;i++){
+    const gx=(i*67+13)%W, gw=8+((i*31)%12);
+    ctx.fillRect(gx,GROUND_Y+2, gw, 3);
+  }
+
+  // 平台柱子
+  ctx.fillStyle='#3a3a4a';
+  ctx.fillRect(100,GROUND_Y-60, 12, 60);
+  ctx.fillRect(540,GROUND_Y-40, 10, 40);
+  ctx.fillStyle='#4a4a5a';
+  ctx.fillRect(96,GROUND_Y-64, 20, 6);
+  ctx.fillRect(536,GROUND_Y-44, 18, 6);
+}
+
+function drawHUD(mechs, remoteIndex){
+  for(let i=0;i<mechs.length;i++){
+    const m=mechs[i];
+    if(!m) continue;
+    const isP1 = (i===0);
+    const hx = isP1 ? 20 : W-220;
+    const hy = 12;
+
+    // 名字
+    ctx.fillStyle=m.color==='red'?'#f66':'#6cf';
+    ctx.font='bold 12px monospace';
+    ctx.textAlign=isP1?'left':'right';
+    ctx.fillText(m.name||(isP1?'P1':'P2'), isP1?hx:W-20, hy+10);
+
+    // 血条背景
+    ctx.fillStyle='#222';
+    ctx.fillRect(hx, hy+14, 200, 14);
+    // 血条
+    const hpPct = m.hp/m.maxhp;
+    const hpColor = hpPct>0.5 ? '#4c4' : (hpPct>0.25 ? '#cc4' : '#c44');
+    ctx.fillStyle=hpColor;
+    ctx.fillRect(hx+1, hy+15, 198*hpPct, 12);
+    // 血条边框
+    ctx.strokeStyle='#556';
+    ctx.lineWidth=1;
+    ctx.strokeRect(hx, hy+14, 200, 14);
+
+    // 血量数字
+    ctx.fillStyle='#fff';
+    ctx.font='9px monospace';
+    ctx.textAlign='center';
+    ctx.fillText(`${Math.ceil(m.hp)}/${m.maxhp}`, hx+100, hy+24);
+
+    // 能量条
+    ctx.fillStyle='#222';
+    ctx.fillRect(hx, hy+30, 100, 6);
+    const enPct = m.energy/m.maxEnergy;
+    ctx.fillStyle='#48f';
+    ctx.fillRect(hx+1, hy+31, 98*enPct, 4);
+
+    // 防御槽
+    ctx.fillStyle='#222';
+    ctx.fillRect(hx, hy+38, 100, 6);
+    const gdPct = m.guard/m.maxGuard;
+    ctx.fillStyle=gdPct>0.5?'#8cf':(gdPct>0.25?'#cc4':'#c44');
+    ctx.fillRect(hx+1, hy+39, 98*gdPct, 4);
+    ctx.fillStyle='#667';
+    ctx.font='7px monospace';
+    ctx.textAlign='center';
+    ctx.fillText('GUARD', hx+50, hy+44);
+
+    // 连击计数
+    if(m.comboCount>0){
+      ctx.fillStyle='#ffd64a';
+      ctx.font='bold 14px monospace';
+      ctx.textAlign='center';
+      ctx.fillText(`${m.comboCount} HIT!`, W/2, 50);
+      ctx.fillStyle='#fff';
+      ctx.font='10px monospace';
+      ctx.fillText(`x${(m.dmgScale*100).toFixed(0)}%`, W/2, 64);
+    }
+  }
+}
+
+function drawResult(mechs){
+  const alive = mechs.filter(m=>!m.dead);
+  if(alive.length===mechs.length) return;
+  const winner = alive.length>0 ? alive[0] : null;
+  ctx.fillStyle='rgba(0,0,0,0.6)';
+  ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle='#ffd64a';
+  ctx.font='bold 36px monospace';
+  ctx.textAlign='center';
+  ctx.textBaseline='middle';
+  if(winner){
+    ctx.fillText(`${winner.name||(winner.color==='red'?'P1':'P2')} 胜利!`, W/2, H/2-20);
+  } else {
+    ctx.fillText('平局!', W/2, H/2-20);
+  }
+  ctx.fillStyle='#8af';
+  ctx.font='14px monospace';
+  ctx.fillText('按 R 重新开始', W/2, H/2+30);
+  ctx.textBaseline='alphabetic';
+}
+
+/* ===== AI 对手 ===== */
+function aiInput(me, opp, dt){
+  const input = { left:0, right:0, up:0, down:0, attack:0, skill:0, roll:0, heavy:0 };
+  if(me.dead || me.atkPhase || me.state==='roll' || me.hitstunTimer>0) return input;
+
+  const dx = opp.x - me.x;
+  const dist = Math.abs(dx);
+  const dir = dx>0?1:-1;
+
+  // 随机决策
+  me.aiTimer = (me.aiTimer||0) - dt;
+  if(me.aiTimer<=0){
+    me.aiAction = Math.random();
+    me.aiTimer = 0.2 + Math.random()*0.3;
+  }
+
+  // 朝向对手
+  if(dist>30) input[dir>0?'right':'left'] = 1;
+
+  // 跳跃
+  if(opp.y<me.y-20 && Math.random()<0.3) input.up = 1;
+
+  // 防御 (对手可能在攻击)
+  if(opp.atkPhase==='active' || opp.atkPhase==='startup'){
+    if(Math.random()<0.5) input.down = 1;
+  }
+
+  // 攻击
+  if(dist<50 && me.aiAction>0.7){
+    if(dist<30) input.attack = 1;
+    else input.heavy = 1;
+  }
+
+  // 技能
+  if(dist>60 && dist<200 && me.energy>=35 && me.aiAction>0.85){
+    input.skill = 1;
+  }
+
+  // 翻滚
+  if(opp.atkPhase==='active' && dist<40 && Math.random()<0.3){
+    input.roll = 1;
+  }
+
+  return input;
+}
+
+/* ===== 游戏状态 ===== */
+let game = null;
+
+function createGame(mode, seed){
+  const p1 = new Mech({ x:60, y:0, dir:1, color:'red', name:'P1', isAI:false });
+  const p2 = new Mech({ x:W-60-MECH_W, y:0, dir:-1, color:'blue', name:'P2', isAI:mode==='ai' });
+  if(mode==='online'){
+    p2.name = '对手';
+    p2.isAI = false;
+  }
+  return {
+    mode: mode,            // 'ai'|'local'|'online'
+    mechas: [p1, p2],
+    beams: [],
+    parts: [],
+    shake: 0,
+    time: 0,
+    remoteIndex: (mode==='online' && seed===1) ? 1 : -1,
+    pvpConnected: false,
+    ws: null,
+    opponentInput: { left:0, right:0, up:0, down:0, attack:0, skill:0, roll:0, heavy:0 },
+  };
+}
+
+function resetGame(){
+  game = createGame(game ? game.mode : 'ai', 0);
+  updateStatusText();
+}
+
+function updateStatusText(){
+  const el = document.getElementById('status');
+  if(!game) { el.textContent='单人模式 (AI)'; return; }
+  if(game.mode==='ai') el.textContent='单人模式 (AI)';
+  else if(game.mode==='local') el.textContent='双人模式 (同屏)';
+  else if(game.mode==='online') el.textContent='联机模式' + (game.pvpConnected?' (已连接)':' (匹配中...)');
+}
+
+/* ===== 输入系统 ===== */
+const keys = {};
+const input1 = { left:0, right:0, up:0, down:0, attack:0, skill:0, roll:0, heavy:0 };
+const input2 = { left:0, right:0, up:0, down:0, attack:0, skill:0, roll:0, heavy:0 };
+
+document.addEventListener('keydown', e=>{
+  keys[e.key]=true;
+  if(e.key==='r'||e.key==='R') resetGame();
+  // 防止页面滚动
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+});
+document.addEventListener('keyup', e=>{ keys[e.key]=false; });
+
+function processInput(){
+  // P1 键盘
+  input1.left = keys['a']||keys['A']||keys['ArrowLeft']?1:0;
+  input1.right = keys['d']||keys['D']||keys['ArrowRight']?1:0;
+  input1.up = keys['w']||keys['W']||keys['ArrowUp']?1:0;
+  input1.down = keys['s']||keys['S']||keys['ArrowDown']?1:0;
+  input1.attack = keys['j']||keys['J']?1:0;
+  input1.heavy = keys['h']||keys['H']?1:0;
+  input1.skill = keys['k']||keys['K']?1:0;
+  input1.roll = keys['l']||keys['L']?1:0;
+
+  // P2 键盘 (同屏双人)
+  input2.left = keys['u']||keys['U']?1:0;
+  input2.right = keys['i']||keys['I']?1:0;
+  input2.up = keys['o']||keys['O']?1:0;
+  input2.down = keys['p']||keys['P']?1:0;
+  input2.attack = keys['7']?1:0;
+  input2.skill = keys['8']?1:0;
+  input2.roll = keys['9']?1:0;
+}
+
+/* ===== 触控/鼠标支持 ===== */
+let touchMode = false;
+let mouseDown = false;
+let mouseX = 0, mouseY = 0;
+const touchBtns = {};
+
+function setupTouch(canvas){
+  // 鼠标/触控统一处理
+  function onPointerDown(e){
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W/rect.width, scaleY = H/rect.height;
+    const cx = (e.clientX - rect.left) * scaleX;
+    const cy = (e.clientY - rect.top) * scaleY;
+    mouseDown = true; mouseX = cx; mouseY = cy;
+    handleTouchPress(cx, cy);
+  }
+  function onPointerMove(e){
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W/rect.width, scaleY = H/rect.height;
+    mouseX = (e.clientX - rect.left) * scaleX;
+    mouseY = (e.clientY - rect.top) * scaleY;
+  }
+  function onPointerUp(e){
+    e.preventDefault();
+    mouseDown = false;
+    releaseAllTouch();
+  }
+
+  canvas.addEventListener('mousedown', onPointerDown);
+  canvas.addEventListener('mousemove', onPointerMove);
+  canvas.addEventListener('mouseup', onPointerUp);
+  canvas.addEventListener('mouseleave', onPointerUp);
+  canvas.addEventListener('touchstart', e=>{
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W/rect.width, scaleY = H/rect.height;
+    const cx = (t.clientX - rect.left) * scaleX;
+    const cy = (t.clientY - rect.top) * scaleY;
+    mouseDown = true; mouseX = cx; mouseY = cy;
+    handleTouchPress(cx, cy);
+  }, {passive:false});
+  canvas.addEventListener('touchmove', e=>{
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W/rect.width, scaleY = H/rect.height;
+    mouseX = (t.clientX - rect.left) * scaleX;
+    mouseY = (t.clientY - rect.top) * scaleY;
+  }, {passive:false});
+  canvas.addEventListener('touchend', e=>{
+    e.preventDefault();
+    mouseDown = false;
+    releaseAllTouch();
+  }, {passive:false});
+}
+
+function handleTouchPress(cx, cy){
+  if(!touchMode) return;
+  // 左半屏: 方向键 (上/下/左/右)
+  if(cx < W/2){
+    if(cy < H/3) { input1.up = 1; touchBtns.up = true; }
+    else if(cy > H*2/3) { input1.down = 1; touchBtns.down = true; }
+    else if(cx < W/4) { input1.left = 1; touchBtns.left = true; }
+    else { input1.right = 1; touchBtns.right = true; }
+  } else {
+    // 右半屏: 动作键
+    if(cy < H/3) { input1.attack = 1; touchBtns.attack = true; }
+    else if(cy < H*2/3) { input1.skill = 1; touchBtns.skill = true; }
+    else { input1.roll = 1; touchBtns.roll = true; }
+  }
+}
+
+function releaseAllTouch(){
+  for(const k of Object.keys(touchBtns)){
+    if(k==='up') input1.up = 0;
+    else if(k==='down') input1.down = 0;
+    else if(k==='left') input1.left = 0;
+    else if(k==='right') input1.right = 0;
+    else if(k==='attack') input1.attack = 0;
+    else if(k==='skill') input1.skill = 0;
+    else if(k==='roll') input1.roll = 0;
+  }
+  for(const k in touchBtns) delete touchBtns[k];
+}
+
+setupTouch(canvas);
+
+// 触控模式切换
+document.getElementById('modeBtn').addEventListener('click', ()=>{
+  touchMode = !touchMode;
+  document.getElementById('modeBtn').textContent = touchMode ? '触控模式: 开' : '触控模式: 关';
+});
+
+/* ===== 联机 ===== */
+let wsUrl = 'ws://' + window.location.hostname + ':3000';
+let pvpAttempted = false;
+
+document.getElementById('pvpLink').addEventListener('click', e=>{
+  e.preventDefault();
+  if(pvpAttempted) return;
+  pvpAttempted = true;
+  connectPVP();
+});
+
+document.getElementById('resetLink').addEventListener('click', e=>{
+  e.preventDefault();
+  resetGame();
+  // 如果是联机模式，重新连接
+  if(game && game.mode==='online' && game.ws){
+    try{ game.ws.close(); }catch(ex){}
+  }
+  pvpAttempted = false;
+});
+
+function connectPVP(){
+  const status = document.getElementById('status');
+  status.textContent = '正在连接服务器...';
+  try {
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      status.textContent = '已连接，正在匹配...';
+      ws.send(JSON.stringify({ type: 'match' }));
+    };
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        handleWSMessage(msg, ws);
+      } catch(ex) { /* ignore */ }
+    };
+    ws.onclose = () => {
+      if(game && game.mode==='online'){
+        game.pvpConnected = false;
+        status.textContent = '联机已断开';
+        // 回退到AI模式
+        game.mode = 'ai';
+        game.mechas[1].isAI = true;
+        game.mechas[1].name = 'AI';
+        updateStatusText();
+      }
+    };
+    ws.onerror = () => {
+      status.textContent = '连接失败，使用单人模式';
+      if(game) game.mode = 'ai';
+      updateStatusText();
+    };
+  } catch(ex) {
+    status.textContent = '连接失败，使用单人模式';
+    if(game) game.mode = 'ai';
+    updateStatusText();
+  }
+}
+
+function handleWSMessage(msg, ws){
+  const status = document.getElementById('status');
+  switch(msg.type){
+    case 'welcome':
+      console.log('已连接, ID:', msg.playerId);
+      break;
+    case 'queued':
+      status.textContent = `匹配队列中... (位置: ${msg.position})`;
+      break;
+    case 'matched':
+      status.textContent = `匹配成功! 对手: ${msg.opponentId}`;
+      if(!game || game.mode!=='online'){
+        game = createGame('online', msg.playerIndex);
+        game.ws = ws;
+        game.pvpConnected = true;
+      } else {
+        game.mode = 'online';
+        game.ws = ws;
+        game.pvpConnected = true;
+        game.mechas[1].isAI = false;
+        game.mechas[1].name = '对手';
+      }
+      updateStatusText();
+      break;
+    case 'remote_input':
+      if(game && game.opponentInput){
+        game.opponentInput = msg.input || game.opponentInput;
+      }
+      break;
+    case 'opponent_left':
+      status.textContent = '对手已离开';
+      if(game){
+        game.mode = 'ai';
+        game.mechas[1].isAI = true;
+        game.mechas[1].name = 'AI';
+        game.pvpConnected = false;
+      }
+      updateStatusText();
+      break;
+    case 'error':
+      status.textContent = '错误: ' + msg.message;
+      break;
+  }
+}
+
+/* ===== 游戏主循环 ===== */
+let lastTime = 0;
+
+function gameLoop(timestamp){
+  const dt = Math.min((timestamp - lastTime)/1000, 0.05);
+  lastTime = timestamp;
+
+  if(game){
+    // 输入处理
+    processInput();
+
+    // 发送联机输入
+    if(game.mode==='online' && game.ws && game.pvpConnected){
+      try {
+        game.ws.send(JSON.stringify({
+          type: 'input',
+          input: {
+            left: input1.left, right: input1.right,
+            up: input1.up, down: input1.down,
+            attack: input1.attack, skill: input1.skill,
+            roll: input1.roll, heavy: input1.heavy,
+          },
+          seq: game.time
+        }));
+      } catch(ex) { /* ignore */ }
+    }
+
+    // 更新 P1
+    const p1 = game.mechas[0];
+    const p2 = game.mechas[1];
+    if(p1 && !p1.dead){
+      p1.update(dt, input1, p2, game);
+    }
+
+    // 更新 P2
+    if(p2){
+      if(game.mode==='ai'){
+        const ai = aiInput(p2, p1, dt);
+        p2.update(dt, ai, p1, game);
+      } else if(game.mode==='local'){
+        p2.update(dt, input2, p1, game);
+      } else if(game.mode==='online' && game.opponentInput){
+        p2.update(dt, game.opponentInput, p1, game);
+      } else {
+        // 默认AI
+        const ai = aiInput(p2, p1, dt);
+        p2.update(dt, ai, p1, game);
+      }
+    }
+
+    // 更新光束
+    for(let i=game.beams.length-1; i>=0; i--){
+      game.beams[i].update(dt, game);
+      if(game.beams[i].dead) game.beams.splice(i,1);
+    }
+
+    // 更新粒子
+    for(let i=game.parts.length-1; i>=0; i--){
+      game.parts[i].update(dt);
+      if(game.parts[i].dead) game.parts.splice(i,1);
+    }
+
+    // 屏幕震动衰减
+    if(game.shake>0) game.shake = Math.max(0, game.shake - dt*30);
+
+    game.time += dt;
+  }
+
+  // === 渲染 ===
+  ctx.save();
+
+  // 屏幕震动
+  if(game && game.shake>0){
+    const sx = (Math.random()-0.5)*game.shake;
+    const sy = (Math.random()-0.5)*game.shake;
+    ctx.translate(sx, sy);
+  }
+
+  // 清屏
+  ctx.fillStyle='#0a0a12';
+  ctx.fillRect(-10,-10,W+20,H+20);
+
+  // 背景
+  drawBackground();
+
+  if(game){
+    // 绘制光束
+    for(const b of game.beams){
+      ctx.fillStyle='#6cf';
+      ctx.shadowColor='#6cf';
+      ctx.shadowBlur=8;
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.shadowBlur=0;
+    }
+
+    // 绘制机甲
+    drawMech(game.mechas[0]);
+    if(!game.mechas[1].dead) drawMech(game.mechas[1]);
+
+    // 绘制粒子
+    for(const p of game.parts){
+      ctx.globalAlpha=p.alpha;
+      ctx.fillStyle=p.color;
+      ctx.fillRect(p.x-p.s/2, p.y-p.s/2, p.s, p.s);
+    }
+    ctx.globalAlpha=1;
+
+    // HUD
+    drawHUD(game.mechas, game.remoteIndex);
+
+    // 胜负判定
+    drawResult(game.mechas);
+  }
+
+  ctx.restore();
+
+  requestAnimationFrame(gameLoop);
+}
+
+// 初始化游戏
+game = createGame('ai', 0);
+updateStatusText();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>

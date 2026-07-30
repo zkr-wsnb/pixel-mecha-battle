@@ -1,0 +1,12 @@
+{
+  "name": "pixel-mecha-battle",
+  "version": "1.0.0",
+  "description": "像素机甲对战 - 联机PVP",
+  "scripts": {
+    "server": "node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
